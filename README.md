@@ -3,22 +3,32 @@
 AI-powered book library management system using Claude Haiku for intelligent tagging, with Calibre-Web for a clean browsing interface.
 
 ## Architecture
+
 ```
 Mac (local)                          VPS (remote)
 ┌──────────────────┐                ┌──────────────────────────┐
 │  Calibre App     │   syncbooks    │  Calibre-Web             │
 │  + AI Tagger     │ ──────────────>│  (browser interface)     │
-│  + Tag Cleanup   │                │  http://YOUR_IP:8083     │
-│                  │                │                          │
-│  ~/Desktop/      │                │  ~/calibre-library/      │
-│  Calibre Library │                │  Calibre Library/        │
-└──────────────────┘                └──────────────────────────┘
-   Master copy                         Synced copy
-   (add/tag here)                      (browse/read here)
+│  + Tag Cleanup   │                │  https://kirillbooks.    │
+│                  │                │    duckdns.org           │
+│  ~/Desktop/      │                │                          │
+│  Calibre Library │                │  ~/calibre-library/      │
+└──────────────────┘                │  Calibre Library/        │
+   Master copy                      │                          │
+   (add/tag here)                   │  Nginx reverse proxy     │
+                                    │  + Let's Encrypt SSL     │
+                                    └──────────────────────────┘
+                                       Synced copy
+                                       (browse/read here)
 ```
 
 - **Mac** = master library. Add books, fetch metadata, run AI tagger here.
 - **VPS** = always-on Calibre-Web. Browse, search, and read from anywhere.
+
+## Live Library
+
+- **URL:** https://kirillbooks.duckdns.org
+- **OPDS Feed:** https://kirillbooks.duckdns.org/opds
 
 ## Setup
 
@@ -30,8 +40,9 @@ Mac (local)                          VPS (remote)
 - Ubuntu VPS with Calibre-Web
 
 ### Mac Setup
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/calibre-ai-tagger.git ~/calibre-tagger
+git clone https://github.com/kkpodtechideas-wq/Caliber-AI-tagger.git ~/calibre-tagger
 cd ~/calibre-tagger
 python3 -m venv venv
 source venv/bin/activate
@@ -39,7 +50,17 @@ pip install anthropic
 export ANTHROPIC_API_KEY='your-key-here'
 ```
 
+### Shell Aliases (add to ~/.zshrc)
+
+```bash
+alias tagbooks="cd ~/calibre-tagger && source venv/bin/activate && python tagger.py"
+alias syncbooks='rsync -avz --progress ~/Desktop/"Calibre Library"/ kirill@77.42.19.116:~/calibre-library/"Calibre Library"/'
+```
+
+After adding books: `tagbooks && syncbooks`
+
 ### VPS Setup
+
 ```bash
 pip3 install calibreweb --break-system-packages
 pip3 install anthropic --break-system-packages
@@ -59,12 +80,45 @@ EOF'
 
 sudo systemctl enable calibre-web
 sudo systemctl start calibre-web
-sudo ufw allow 8083
 ```
 
-Calibre-Web: http://YOUR_VPS_IP:8083
-Database path: /home/kirill/calibre-library/Calibre Library
-Default login: admin / admin123 (change immediately)
+Calibre-Web listens on `127.0.0.1:8083` (proxied through Nginx).
+Database path: `/home/kirill/calibre-library/Calibre Library`
+
+### Nginx + HTTPS Setup
+
+Domain: `kirillbooks.duckdns.org` (free subdomain via DuckDNS, pointed at VPS IP)
+
+```bash
+sudo apt install nginx certbot python3-certbot-nginx -y
+```
+
+Nginx config at `/etc/nginx/sites-available/calibre-web`:
+
+```nginx
+server {
+    listen 80;
+    server_name kirillbooks.duckdns.org;
+    client_max_body_size 100M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8083;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+SSL via Let's Encrypt:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/calibre-web /etc/nginx/sites-enabled/
+sudo certbot --nginx -d kirillbooks.duckdns.org
+```
+
+Certificate auto-renews every 90 days.
 
 ## Daily Workflows
 
@@ -76,13 +130,15 @@ Default login: admin / admin123 (change immediately)
 4. Run AI tagger: `tagbooks`
 5. Sync to VPS: `syncbooks`
 
-### Shell Aliases (add to ~/.zshrc)
-```bash
-alias tagbooks="cd ~/calibre-tagger && source venv/bin/activate && python tagger.py"
-alias syncbooks='rsync -avz --progress ~/Desktop/"Calibre Library"/ kirill@YOUR_VPS_IP:~/calibre-library/"Calibre Library"/'
-```
+### Tag Cleanup (when needed)
 
-After adding books: `tagbooks && syncbooks`
+```bash
+ssh kirill@77.42.19.116
+sudo systemctl stop calibre-web
+export ANTHROPIC_API_KEY='your-key-here'
+python3 ~/cleanup.py
+sudo systemctl start calibre-web
+```
 
 ## Tag Structure
 
@@ -98,28 +154,18 @@ After adding books: `tagbooks && syncbooks`
 | era: | Time period | era:19th century |
 | language: | If non-English | language:Russian |
 
-## Tag Cleanup
-
-When tags get messy, run cleanup on VPS:
-```bash
-sudo systemctl stop calibre-web
-export ANTHROPIC_API_KEY='your-key-here'
-python3 ~/cleanup.py
-sudo systemctl start calibre-web
-```
-
 ## Customizing Tags
 
-Edit tagger.py > TAGGING_PROMPT to modify categories.
+Edit `tagger.py` > `TAGGING_PROMPT` to modify categories.
 
 To add a new category:
 1. Add to JSON format in the prompt
-2. Add to format_tags_for_calibre() function
-3. Update cleanup.py allowed lists if needed
+2. Add to `format_tags_for_calibre()` function
+3. Update `cleanup.py` allowed lists if needed
 
 ## Force Re-Tagging
 
-In tagger.py, change:
+In `tagger.py`, change:
 ```python
 has_ai_tags = any(":" in tag for tag in existing)
 if not has_ai_tags:
@@ -129,16 +175,55 @@ to:
 if True:  # Force re-tag all
 ```
 
+## UI Customizations
+
+The dark theme (caliBlur) has several CSS overrides applied in:
+`/home/kirill/.local/lib/python3.13/site-packages/calibreweb/cps/static/css/caliBlur_override.css`
+
+Current customizations:
+- **"You Might Enjoy"** random book recommendations on homepage (replaces hidden "Discover" section)
+- **Hidden redundant "Books" header** from main content area
+- Georgia serif heading style for the recommendation section
+
+Template change in `index.html`:
+- Heading changed from "Discover (Random Books)" to "You Might Enjoy"
+
+Note: These customizations live on the VPS and will need to be reapplied if Calibre-Web is upgraded. Backup files:
+- `caliBlur_override.css` — see `vps-customizations/` folder in this repo
+
+## Connecting Devices
+
+### iPhone (Safari)
+1. Open https://kirillbooks.duckdns.org in Safari
+2. Tap Share > Add to Home Screen
+3. Name it "Library"
+
+### iPhone (OPDS reader app — better for reading)
+1. Download KyBook 3 from App Store
+2. Add OPDS catalog: `https://kirillbooks.duckdns.org/opds`
+3. Enter your login credentials
+
+### Kindle
+Set up email delivery in Admin > Edit Email Server Settings, then use "Send to Kindle" button on each book.
+
+## User Management
+
+Add users in Admin > Add New User. Recommended permissions for regular users:
+- ✅ Download, View Books, Password (change own)
+- ☐ Admin, Upload, Edit, Delete, Public Shelf
+
+Users cannot see other users or admin settings. Reading progress, shelves, and bookmarks are private per user.
+
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| ModuleNotFoundError: anthropic | pip install anthropic |
+| ModuleNotFoundError: anthropic | `pip install anthropic` |
 | Model not found | Check model string in tagger.py |
 | Database not found | Check CALIBRE_LIBRARY path |
 | Database is locked | Close Calibre first |
 | Calibre-Web 500 error | Add missing columns (see below) |
-| Can't connect to Calibre-Web | sudo ufw allow 8083 |
+| SSL cert expired | `sudo certbot renew` |
 
 Fix missing DB columns:
 ```bash
@@ -160,3 +245,5 @@ journalctl -u calibre-web -f
 
 - AI Tagger: ~$0.003/book (~$2.50 for 850 books)
 - Tag Cleanup: ~$0.10-0.20 per run
+- Domain: Free (DuckDNS)
+- SSL: Free (Let's Encrypt)
